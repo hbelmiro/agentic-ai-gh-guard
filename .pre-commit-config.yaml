@@ -1,0 +1,8 @@
+---
+# NOTE: dependabot does not auto-update pre-commit hook revs.
+# Run `pre-commit autoupdate` periodically to bump versions.
+repos:
+  - repo: https://github.com/pypa/pip-audit
+    rev: v2.9.0
+    hooks:
+      - id: pip-audit

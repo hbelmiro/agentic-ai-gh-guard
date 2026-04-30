@@ -1,0 +1,38 @@
+[project]
+name = "agentic-ai-gh-guard"
+version = "0.1.0"
+description = "Claude Code hook that auto-allows read-only gh CLI commands and prompts for writes"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.11",
+    "ty>=0.0.1a1",
+    "pre-commit>=4",
+]
+ci = [
+    "yamllint>=1",
+    "pip-audit>=2",
+]
+
+[tool.ruff]
+# ruff does not yet support py314
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",
+    "ANN",
+    "S101",
+    "COM812",
+    "PLR2004",
+    "PLR0911",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
