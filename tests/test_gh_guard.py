@@ -10,6 +10,15 @@ import pytest
 from gh_guard import evaluate_command, main, parse_args, setup_logging
 
 
+def _hook_response(decision: str) -> dict:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+        }
+    }
+
+
 class TestReadOnlyCommands:
     """Read-only gh commands should return 'allow'."""
 
@@ -546,22 +555,13 @@ class TestMain:
             main()
         return json.loads(stdout.getvalue())
 
-    @staticmethod
-    def _hook_response(decision: str) -> dict:
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": decision,
-            }
-        }
-
     def test_main_allow(self) -> None:
         result = self._run_main({"tool_input": {"command": "gh pr list"}})
-        assert result == self._hook_response("allow")
+        assert result == _hook_response("allow")
 
     def test_main_ask(self) -> None:
         result = self._run_main({"tool_input": {"command": "gh pr create --fill"}})
-        assert result == self._hook_response("ask")
+        assert result == _hook_response("ask")
 
     def test_main_invalid_json(self) -> None:
         stdin = io.StringIO("not json")
@@ -574,15 +574,15 @@ class TestMain:
         ):
             main()
         result = json.loads(stdout.getvalue())
-        assert result == self._hook_response("ask")
+        assert result == _hook_response("ask")
 
     def test_main_missing_tool_input(self) -> None:
         result = self._run_main({})
-        assert result == self._hook_response("allow")
+        assert result == _hook_response("allow")
 
     def test_main_missing_command(self) -> None:
         result = self._run_main({"tool_input": {}})
-        assert result == self._hook_response("allow")
+        assert result == _hook_response("allow")
 
     def test_main_no_log_on_stdout(self) -> None:
         stdin = io.StringIO(json.dumps({"tool_input": {"command": "gh pr list"}}))
@@ -596,7 +596,7 @@ class TestMain:
             main()
         lines = stdout.getvalue().strip().split("\n")
         assert len(lines) == 1
-        assert json.loads(lines[0]) == self._hook_response("allow")
+        assert json.loads(lines[0]) == _hook_response("allow")
 
 
 class TestParseArgs:
@@ -835,12 +835,7 @@ class TestLoggingResilience:
         ):
             main()
         result = json.loads(stdout.getvalue())
-        assert result == {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-            }
-        }
+        assert result == _hook_response("allow")
 
     def test_main_works_when_log_dir_unwritable(self, tmp_path: Path) -> None:
         unwritable = tmp_path / "readonly"
@@ -857,11 +852,6 @@ class TestLoggingResilience:
             ):
                 main()
             result = json.loads(stdout.getvalue())
-            assert result == {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }
-            }
+            assert result == _hook_response("allow")
         finally:
             unwritable.chmod(0o755)
