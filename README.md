@@ -45,10 +45,11 @@ Add the hook to your Claude Code settings:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash(gh *)",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
+            "if": "Bash(gh *)",
             "command": "python3 /path/to/agentic-ai-gh-guard/src/gh_guard.py --log-level info"
           }
         ]
@@ -105,11 +106,11 @@ For compound commands (`&&`, `||`, `;`, `|`), each part is evaluated independent
 
 ## How hooks work
 
-This is a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks). When Claude tries to run a Bash command matching `gh *`:
+This is a Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks). When Claude tries to run a Bash command matching `gh *`:
 
 1. The hook receives the command as JSON on stdin
 2. It evaluates whether the command is read-only
-3. It outputs `{"permissionDecision": "allow"}` or `{"permissionDecision": "ask"}`
+3. It outputs a JSON decision using the [`hookSpecificOutput` format](https://code.claude.com/docs/en/hooks)
 4. Claude Code either auto-allows or shows the normal permission prompt
 
 The hook only runs when **Claude** uses `gh` -- it does not affect commands you run directly in your terminal.

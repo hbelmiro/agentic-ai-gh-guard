@@ -10,6 +10,15 @@ import pytest
 from gh_guard import evaluate_command, main, parse_args, setup_logging
 
 
+def _hook_response(decision: str) -> dict:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+        }
+    }
+
+
 class TestReadOnlyCommands:
     """Read-only gh commands should return 'allow'."""
 
@@ -178,6 +187,13 @@ class TestGhApiReadOnly:
     )
     def test_api_get_requests(self, command: str) -> None:
         assert evaluate_command(command) == "allow"
+
+    def test_api_get_with_jq_and_redirect(self) -> None:
+        cmd = (
+            "gh api repos/kubeflow/pipelines/git/trees/master"
+            " --jq '.tree[].path' 2>/dev/null"
+        )
+        assert evaluate_command(cmd) == "allow"
 
 
 class TestWriteCommands:
@@ -467,6 +483,54 @@ class TestShellEdgeCases:
         assert evaluate_command(f"gh issue list {long_flags}") == "allow"
 
 
+class TestCompoundSplitQuoting:
+    """Compound operators inside quotes should not split the command."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh api repos/foo/bar --jq '.items[]|.name'",
+            "gh api repos/foo/bar --jq '.|keys'",
+            "gh api repos/foo/bar --jq '.[]|select(.state)|.title'",
+            'gh api repos/foo/bar --jq ".items[]|.name"',
+            "gh api repos/foo/bar --jq '.x&&.y'",
+            "gh api repos/foo/bar --jq '.a||.b'",
+            "gh api repos/foo/bar --jq '.a;.b'",
+        ],
+    )
+    def test_quoted_operators_in_jq(self, command: str) -> None:
+        assert evaluate_command(command) == "allow"
+
+    def test_quoted_pipe_with_real_pipe(self) -> None:
+        assert (
+            evaluate_command("gh api repos/foo/bar --jq '.items[]|.name' | cat")
+            == "allow"
+        )
+
+    def test_quoted_pipe_with_real_compound(self) -> None:
+        assert (
+            evaluate_command("gh api repos/foo/bar --jq '.items[]|.name' && gh pr list")
+            == "allow"
+        )
+
+    def test_quoted_pipe_with_write_after_real_compound(self) -> None:
+        assert (
+            evaluate_command(
+                "gh api repos/foo/bar --jq '.items[]|.name' && gh pr create --fill"
+            )
+            == "ask"
+        )
+
+    def test_unmatched_quote_fails_closed(self) -> None:
+        assert evaluate_command("gh api repos/foo/bar --jq '.items[]") == "ask"
+
+    def test_shell_redirect_with_jq(self) -> None:
+        assert (
+            evaluate_command("gh api repos/foo/bar --jq '.items[]|.name' 2>/dev/null")
+            == "allow"
+        )
+
+
 class TestMain:
     """Test the main() stdin/stdout JSON wrapper."""
 
@@ -493,11 +557,11 @@ class TestMain:
 
     def test_main_allow(self) -> None:
         result = self._run_main({"tool_input": {"command": "gh pr list"}})
-        assert result == {"permissionDecision": "allow"}
+        assert result == _hook_response("allow")
 
     def test_main_ask(self) -> None:
         result = self._run_main({"tool_input": {"command": "gh pr create --fill"}})
-        assert result == {"permissionDecision": "ask"}
+        assert result == _hook_response("ask")
 
     def test_main_invalid_json(self) -> None:
         stdin = io.StringIO("not json")
@@ -510,15 +574,15 @@ class TestMain:
         ):
             main()
         result = json.loads(stdout.getvalue())
-        assert result == {"permissionDecision": "ask"}
+        assert result == _hook_response("ask")
 
     def test_main_missing_tool_input(self) -> None:
         result = self._run_main({})
-        assert result == {"permissionDecision": "allow"}
+        assert result == _hook_response("allow")
 
     def test_main_missing_command(self) -> None:
         result = self._run_main({"tool_input": {}})
-        assert result == {"permissionDecision": "allow"}
+        assert result == _hook_response("allow")
 
     def test_main_no_log_on_stdout(self) -> None:
         stdin = io.StringIO(json.dumps({"tool_input": {"command": "gh pr list"}}))
@@ -532,7 +596,7 @@ class TestMain:
             main()
         lines = stdout.getvalue().strip().split("\n")
         assert len(lines) == 1
-        assert json.loads(lines[0]) == {"permissionDecision": "allow"}
+        assert json.loads(lines[0]) == _hook_response("allow")
 
 
 class TestParseArgs:
@@ -771,7 +835,7 @@ class TestLoggingResilience:
         ):
             main()
         result = json.loads(stdout.getvalue())
-        assert result == {"permissionDecision": "allow"}
+        assert result == _hook_response("allow")
 
     def test_main_works_when_log_dir_unwritable(self, tmp_path: Path) -> None:
         unwritable = tmp_path / "readonly"
@@ -788,6 +852,6 @@ class TestLoggingResilience:
             ):
                 main()
             result = json.loads(stdout.getvalue())
-            assert result == {"permissionDecision": "allow"}
+            assert result == _hook_response("allow")
         finally:
             unwritable.chmod(0o755)

@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import json
 import logging
-import re
 import shlex
 import sys
 from logging.handlers import RotatingFileHandler
@@ -62,9 +61,50 @@ WRITE_METHODS: set[str] = {"POST", "PUT", "PATCH", "DELETE"}
 ALLOW = "allow"
 ASK = "ask"
 
-_COMPOUND_SPLIT = re.compile(r"\s*(?:&&|\|\||[;|])\s*")
-
 _logger = logging.getLogger("gh_guard")
+
+
+def _split_compound(command: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(command)
+
+    while i < n:
+        c = command[i]
+
+        if c == "'" and not in_double:
+            in_single = not in_single
+            current.append(c)
+            i += 1
+        elif c == '"' and not in_single:
+            in_double = not in_double
+            current.append(c)
+            i += 1
+        elif c == "\\" and not in_single and i + 1 < n:
+            current.append(c)
+            current.append(command[i + 1])
+            i += 2
+        elif not in_single and not in_double:
+            if command[i : i + 2] in ("&&", "||"):
+                parts.append("".join(current))
+                current = []
+                i += 2
+            elif c in (";", "|"):
+                parts.append("".join(current))
+                current = []
+                i += 1
+            else:
+                current.append(c)
+                i += 1
+        else:
+            current.append(c)
+            i += 1
+
+    parts.append("".join(current))
+    return parts
 
 
 def _parse_api_args(args: list[str]) -> tuple[str | None, str | None, bool]:
@@ -155,7 +195,7 @@ def _evaluate_single(command: str) -> str:
 
 
 def evaluate_command(command: str) -> str:
-    parts = _COMPOUND_SPLIT.split(command)
+    parts = _split_compound(command)
     _logger.debug("compound parts: %d", len(parts))
     for part in parts:
         stripped = part.strip()
@@ -211,7 +251,15 @@ def main() -> None:
         _logger.warning("failed to parse input")
         decision = ASK
 
-    json.dump({"permissionDecision": decision}, sys.stdout)
+    json.dump(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision,
+            }
+        },
+        sys.stdout,
+    )
     sys.stdout.write("\n")
 
 
