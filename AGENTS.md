@@ -6,7 +6,7 @@ A Claude Code `PreToolUse` hook that guards `gh` CLI commands using a positive-l
 
 ## Architecture
 
-- `src/gh_guard.py` — single-file hook script. Reads JSON from stdin (`tool_input.command`), writes JSON to stdout (`permissionDecision: "allow" | "ask"`). Always exits 0.
+- `src/gh_guard.py` — single-file hook script. Reads JSON from stdin (`tool_input.command`), writes JSON to stdout using the `hookSpecificOutput` format (`permissionDecision: "allow" | "ask"`). Always exits 0.
 - `evaluate_command(command)` — core logic, returns `"allow"` or `"ask"`. Handles compound commands (`&&`, `||`, `;`, `|`) by evaluating each part independently — if any part is not read-only, returns `"ask"`.
 - `gh api` has special handling: only allows GET requests with no body flags and no `graphql` endpoint.
 - Design principle: **fail closed**. Unknown commands, parse errors, and unrecognized flags all return `"ask"`.
