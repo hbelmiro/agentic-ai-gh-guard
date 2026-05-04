@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import argparse
+import contextlib
 import json
+import logging
 import re
 import shlex
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 READONLY_SUBCOMMANDS: dict[str, set[str]] = {
     "pr": {"view", "list", "status", "checks", "diff"},
@@ -59,6 +64,8 @@ ASK = "ask"
 
 _COMPOUND_SPLIT = re.compile(r"\s*(?:&&|\|\||[;|])\s*")
 
+_logger = logging.getLogger("gh_guard")
+
 
 def _parse_api_args(args: list[str]) -> tuple[str | None, str | None, bool]:
     has_body_flag = False
@@ -91,6 +98,12 @@ def _parse_api_args(args: list[str]) -> tuple[str | None, str | None, bool]:
 
 def _is_api_readonly(tokens: list[str]) -> bool:
     endpoint, method, has_body_flag = _parse_api_args(tokens[2:])
+    _logger.debug(
+        "api args: endpoint=%s method=%s has_body_flag=%s",
+        endpoint,
+        method,
+        has_body_flag,
+    )
 
     if endpoint is None or endpoint.lower() == "graphql":
         return False
@@ -105,35 +118,45 @@ def _evaluate_single(command: str) -> str:
     try:
         tokens = shlex.split(command)
     except ValueError:
+        _logger.debug("shlex parse error for command")
         return ASK
 
     if not tokens or tokens[0] != "gh":
+        _logger.debug("not a gh command")
         return ALLOW
 
     if len(tokens) < 2:
+        _logger.debug("gh with no subcommand")
         return ASK
 
     cmd = tokens[1]
+    subcmd = tokens[2] if len(tokens) >= 3 else None
+    _logger.debug("evaluating subcommand: %s %s", cmd, subcmd or "")
 
     if cmd in TOP_LEVEL_READONLY:
+        _logger.debug("matched TOP_LEVEL_READONLY: %s", cmd)
         return ALLOW
 
-    if cmd in ALLOW_ALL_SUBCOMMANDS and len(tokens) >= 3:
+    if cmd in ALLOW_ALL_SUBCOMMANDS and subcmd is not None:
+        _logger.debug("matched ALLOW_ALL_SUBCOMMANDS: %s", cmd)
         return ALLOW
 
     if cmd == "api":
-        return ALLOW if _is_api_readonly(tokens) else ASK
+        result = ALLOW if _is_api_readonly(tokens) else ASK
+        _logger.debug("api evaluation: %s", result)
+        return result
 
-    if cmd in READONLY_SUBCOMMANDS:
-        subcmd = tokens[2] if len(tokens) >= 3 else None
-        if subcmd in READONLY_SUBCOMMANDS[cmd]:
-            return ALLOW
+    if cmd in READONLY_SUBCOMMANDS and subcmd in READONLY_SUBCOMMANDS[cmd]:
+        _logger.debug("matched READONLY_SUBCOMMANDS: %s %s", cmd, subcmd)
+        return ALLOW
 
+    _logger.debug("no match, returning ask for: %s", cmd)
     return ASK
 
 
 def evaluate_command(command: str) -> str:
     parts = _COMPOUND_SPLIT.split(command)
+    _logger.debug("compound parts: %d", len(parts))
     for part in parts:
         stripped = part.strip()
         if not stripped:
@@ -143,12 +166,49 @@ def evaluate_command(command: str) -> str:
     return ALLOW
 
 
+def setup_logging(level: str, log_dir: Path | None = None) -> None:
+    if log_dir is None:
+        log_dir = Path.home() / ".agentic-ai-gh-guard" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("gh_guard")
+    if logger.handlers:
+        return
+
+    logger.setLevel(level.upper())
+    logger.propagate = False
+
+    handler = RotatingFileHandler(
+        log_dir / "gh_guard.log",
+        maxBytes=1_048_576,
+        backupCount=3,
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--log-level",
+        choices=("debug", "info", "warning", "error", "critical"),
+        required=True,
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> None:
+    args = parse_args()
+    with contextlib.suppress(OSError, ValueError):
+        setup_logging(args.log_level)
+
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.read())
         command = data.get("tool_input", {}).get("command", "")
         decision = evaluate_command(command)
+        _logger.info("decision: %s", decision)
     except (json.JSONDecodeError, KeyError, TypeError):
+        _logger.warning("failed to parse input")
         decision = ASK
 
     json.dump({"permissionDecision": decision}, sys.stdout)

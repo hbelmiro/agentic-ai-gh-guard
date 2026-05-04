@@ -49,7 +49,7 @@ Add the hook to your Claude Code settings:
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/agentic-ai-gh-guard/src/gh_guard.py"
+            "command": "python3 /path/to/agentic-ai-gh-guard/src/gh_guard.py --log-level info"
           }
         ]
       }
@@ -113,6 +113,26 @@ This is a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claud
 4. Claude Code either auto-allows or shows the normal permission prompt
 
 The hook only runs when **Claude** uses `gh` -- it does not affect commands you run directly in your terminal.
+
+## Logging
+
+The hook logs decisions to `~/.agentic-ai-gh-guard/logs/gh_guard.log` using a rotating file handler (1 MB max, 3 backups).
+
+The `--log-level` flag is required and accepts: `debug`, `info`, `warning`, `error`, `critical`.
+
+| Level      | What it logs                                          |
+|------------|-------------------------------------------------------|
+| `debug`    | Token parsing, subcommand matching, and all decisions |
+| `info`     | Final allow/ask decision for each command             |
+| `warning`  | Input parsing failures                                |
+| `error`    | Errors                                                |
+| `critical` | Critical failures                                     |
+
+Example:
+
+```json
+"command": "python3 /path/to/agentic-ai-gh-guard/src/gh_guard.py --log-level debug"
+```
 
 ## Development
 

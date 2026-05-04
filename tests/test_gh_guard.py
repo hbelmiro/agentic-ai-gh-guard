@@ -1,10 +1,13 @@
 import io
 import json
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from gh_guard import evaluate_command, main
+from gh_guard import evaluate_command, main, parse_args, setup_logging
 
 
 class TestReadOnlyCommands:
@@ -467,10 +470,24 @@ class TestShellEdgeCases:
 class TestMain:
     """Test the main() stdin/stdout JSON wrapper."""
 
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path) -> None:
+        self._tmp_path = tmp_path
+        logger = logging.getLogger("gh_guard")
+        for h in logger.handlers:
+            h.close()
+        logger.handlers.clear()
+        logger.setLevel(logging.WARNING)
+
     def _run_main(self, input_data: dict) -> dict:
         stdin = io.StringIO(json.dumps(input_data))
         stdout = io.StringIO()
-        with patch("sys.stdin", stdin), patch("sys.stdout", stdout):
+        with (
+            patch("sys.stdin", stdin),
+            patch("sys.stdout", stdout),
+            patch("sys.argv", ["gh_guard.py", "--log-level", "warning"]),
+            patch("gh_guard.Path.home", return_value=self._tmp_path),
+        ):
             main()
         return json.loads(stdout.getvalue())
 
@@ -485,7 +502,12 @@ class TestMain:
     def test_main_invalid_json(self) -> None:
         stdin = io.StringIO("not json")
         stdout = io.StringIO()
-        with patch("sys.stdin", stdin), patch("sys.stdout", stdout):
+        with (
+            patch("sys.stdin", stdin),
+            patch("sys.stdout", stdout),
+            patch("sys.argv", ["gh_guard.py", "--log-level", "warning"]),
+            patch("gh_guard.Path.home", return_value=self._tmp_path),
+        ):
             main()
         result = json.loads(stdout.getvalue())
         assert result == {"permissionDecision": "ask"}
@@ -497,3 +519,275 @@ class TestMain:
     def test_main_missing_command(self) -> None:
         result = self._run_main({"tool_input": {}})
         assert result == {"permissionDecision": "allow"}
+
+    def test_main_no_log_on_stdout(self) -> None:
+        stdin = io.StringIO(json.dumps({"tool_input": {"command": "gh pr list"}}))
+        stdout = io.StringIO()
+        with (
+            patch("sys.stdin", stdin),
+            patch("sys.stdout", stdout),
+            patch("sys.argv", ["gh_guard.py", "--log-level", "debug"]),
+            patch("gh_guard.Path.home", return_value=self._tmp_path),
+        ):
+            main()
+        lines = stdout.getvalue().strip().split("\n")
+        assert len(lines) == 1
+        assert json.loads(lines[0]) == {"permissionDecision": "allow"}
+
+
+class TestParseArgs:
+    @pytest.mark.parametrize(
+        ("flag", "expected"),
+        [
+            ("debug", "debug"),
+            ("info", "info"),
+            ("warning", "warning"),
+            ("error", "error"),
+            ("critical", "critical"),
+        ],
+    )
+    def test_valid_levels(self, flag: str, expected: str) -> None:
+        args = parse_args(["--log-level", flag])
+        assert args.log_level == expected
+
+    def test_missing_log_level_raises(self) -> None:
+        with pytest.raises(SystemExit):
+            parse_args([])
+
+    def test_invalid_level_raises(self) -> None:
+        with pytest.raises(SystemExit):
+            parse_args(["--log-level", "trace"])
+
+    def test_defaults_to_sys_argv(self) -> None:
+        with patch("sys.argv", ["gh_guard.py", "--log-level", "info"]):
+            args = parse_args()
+        assert args.log_level == "info"
+
+
+class TestSetupLogging:
+    @pytest.fixture(autouse=True)
+    def _clean_logger(self) -> None:
+        logger = logging.getLogger("gh_guard")
+        for h in logger.handlers:
+            h.close()
+        logger.handlers.clear()
+        logger.setLevel(logging.WARNING)
+
+    def test_creates_directory(self, tmp_path: Path) -> None:
+        log_dir = tmp_path / "logs"
+        setup_logging("info", log_dir=log_dir)
+        assert log_dir.is_dir()
+
+    def test_creates_log_file(self, tmp_path: Path) -> None:
+        log_dir = tmp_path / "logs"
+        setup_logging("debug", log_dir=log_dir)
+        logger = logging.getLogger("gh_guard")
+        logger.debug("test message")
+        assert (log_dir / "gh_guard.log").exists()
+
+    @pytest.mark.parametrize(
+        ("level_str", "level_const"),
+        [
+            ("debug", logging.DEBUG),
+            ("info", logging.INFO),
+            ("warning", logging.WARNING),
+            ("error", logging.ERROR),
+            ("critical", logging.CRITICAL),
+        ],
+    )
+    def test_sets_level(self, tmp_path: Path, level_str: str, level_const: int) -> None:
+        setup_logging(level_str, log_dir=tmp_path)
+        logger = logging.getLogger("gh_guard")
+        assert logger.level == level_const
+
+    def test_uses_rotating_handler(self, tmp_path: Path) -> None:
+        setup_logging("info", log_dir=tmp_path)
+        logger = logging.getLogger("gh_guard")
+        assert len(logger.handlers) == 1
+        assert isinstance(logger.handlers[0], RotatingFileHandler)
+
+    def test_handler_max_bytes(self, tmp_path: Path) -> None:
+        setup_logging("info", log_dir=tmp_path)
+        handler = logging.getLogger("gh_guard").handlers[0]
+        assert isinstance(handler, RotatingFileHandler)
+        assert handler.maxBytes == 1_048_576
+
+    def test_handler_backup_count(self, tmp_path: Path) -> None:
+        setup_logging("info", log_dir=tmp_path)
+        handler = logging.getLogger("gh_guard").handlers[0]
+        assert isinstance(handler, RotatingFileHandler)
+        assert handler.backupCount == 3
+
+    def test_no_propagation(self, tmp_path: Path) -> None:
+        setup_logging("info", log_dir=tmp_path)
+        logger = logging.getLogger("gh_guard")
+        assert logger.propagate is False
+
+    def test_does_not_write_to_stdout(self, tmp_path: Path) -> None:
+        stdout = io.StringIO()
+        setup_logging("debug", log_dir=tmp_path)
+        logger = logging.getLogger("gh_guard")
+        with patch("sys.stdout", stdout):
+            logger.debug("should not appear on stdout")
+        assert stdout.getvalue() == ""
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        setup_logging("info", log_dir=tmp_path)
+        setup_logging("debug", log_dir=tmp_path)
+        logger = logging.getLogger("gh_guard")
+        assert len(logger.handlers) == 1
+
+    def test_default_log_dir(self, tmp_path: Path) -> None:
+        with patch("gh_guard.Path.home", return_value=tmp_path):
+            setup_logging("info")
+        handler = logging.getLogger("gh_guard").handlers[0]
+        assert isinstance(handler, RotatingFileHandler)
+        expected = str(tmp_path / ".agentic-ai-gh-guard" / "logs" / "gh_guard.log")
+        assert handler.baseFilename == expected
+
+    def test_invalid_level_raises_value_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="INVALID"):
+            setup_logging("invalid", log_dir=tmp_path)
+
+
+class TestLogOutput:
+    @pytest.fixture(autouse=True)
+    def _setup_logging(self, tmp_path: Path) -> None:
+        logger = logging.getLogger("gh_guard")
+        for h in logger.handlers:
+            h.close()
+        logger.handlers.clear()
+        logger.setLevel(logging.WARNING)
+        self._log_dir = tmp_path / "logs"
+        setup_logging("debug", log_dir=self._log_dir)
+        self._log_file = self._log_dir / "gh_guard.log"
+
+    def _log_contents(self) -> str:
+        logging.getLogger("gh_guard").handlers[0].flush()
+        return self._log_file.read_text()
+
+    def test_evaluate_logs_subcommand(self) -> None:
+        evaluate_command("gh pr list")
+        logs = self._log_contents()
+        assert "pr" in logs
+        assert "READONLY_SUBCOMMANDS" in logs
+
+    def test_evaluate_logs_compound_parts(self) -> None:
+        evaluate_command("gh pr list && gh issue list")
+        logs = self._log_contents()
+        assert "compound" in logs.lower()
+
+    def test_evaluate_logs_non_gh(self) -> None:
+        evaluate_command("ls -la")
+        logs = self._log_contents()
+        assert "not a gh command" in logs
+
+    def test_evaluate_logs_api_structure(self) -> None:
+        evaluate_command("gh api repos/foo/bar")
+        logs = self._log_contents()
+        assert "repos/foo/bar" in logs
+        assert "has_body_flag" in logs
+
+    def test_main_logs_decision(self, tmp_path: Path) -> None:
+        stdin = io.StringIO(json.dumps({"tool_input": {"command": "gh pr list"}}))
+        stdout = io.StringIO()
+        with (
+            patch("sys.stdin", stdin),
+            patch("sys.stdout", stdout),
+            patch("sys.argv", ["gh_guard.py", "--log-level", "debug"]),
+            patch("gh_guard.Path.home", return_value=tmp_path),
+        ):
+            main()
+        logs = self._log_contents()
+        assert "allow" in logs
+
+    def test_api_secret_in_header_not_logged(self) -> None:
+        evaluate_command(
+            "gh api -H 'Authorization: Bearer sk-secret-token' repos/foo/bar"
+        )
+        logs = self._log_contents()
+        assert "sk-secret-token" not in logs
+        assert "Authorization" not in logs
+        assert "repos/foo/bar" in logs
+
+    def test_secret_set_value_not_logged(self) -> None:
+        evaluate_command("gh secret set MY_SECRET --body super-secret-value")
+        logs = self._log_contents()
+        assert "super-secret-value" not in logs
+        assert "secret" in logs
+
+    def test_api_field_value_not_logged(self) -> None:
+        evaluate_command("gh api -f token=my-private-token repos/foo/bar")
+        logs = self._log_contents()
+        assert "my-private-token" not in logs
+
+    def test_main_does_not_log_full_command(self, tmp_path: Path) -> None:
+        command = "gh api -H 'Authorization: Bearer leaked' repos/foo/bar"
+        stdin = io.StringIO(json.dumps({"tool_input": {"command": command}}))
+        stdout = io.StringIO()
+        with (
+            patch("sys.stdin", stdin),
+            patch("sys.stdout", stdout),
+            patch("sys.argv", ["gh_guard.py", "--log-level", "debug"]),
+            patch("gh_guard.Path.home", return_value=tmp_path),
+        ):
+            main()
+        logs = self._log_contents()
+        assert "leaked" not in logs
+        assert "allow" in logs
+
+    def test_main_logs_warning_on_parse_failure(self, tmp_path: Path) -> None:
+        stdin = io.StringIO("not json")
+        stdout = io.StringIO()
+        with (
+            patch("sys.stdin", stdin),
+            patch("sys.stdout", stdout),
+            patch("sys.argv", ["gh_guard.py", "--log-level", "debug"]),
+            patch("gh_guard.Path.home", return_value=tmp_path),
+        ):
+            main()
+        logs = self._log_contents()
+        assert "WARNING" in logs
+        assert "failed to parse input" in logs
+
+
+class TestLoggingResilience:
+    @pytest.fixture(autouse=True)
+    def _clean_logger(self) -> None:
+        logger = logging.getLogger("gh_guard")
+        for h in logger.handlers:
+            h.close()
+        logger.handlers.clear()
+        logger.setLevel(logging.WARNING)
+
+    def test_main_works_when_logging_setup_fails(self) -> None:
+        stdin = io.StringIO(json.dumps({"tool_input": {"command": "gh pr list"}}))
+        stdout = io.StringIO()
+        with (
+            patch("sys.stdin", stdin),
+            patch("sys.stdout", stdout),
+            patch("sys.argv", ["gh_guard.py", "--log-level", "info"]),
+            patch("gh_guard.setup_logging", side_effect=OSError("disk full")),
+        ):
+            main()
+        result = json.loads(stdout.getvalue())
+        assert result == {"permissionDecision": "allow"}
+
+    def test_main_works_when_log_dir_unwritable(self, tmp_path: Path) -> None:
+        unwritable = tmp_path / "readonly"
+        unwritable.mkdir()
+        unwritable.chmod(0o444)
+        try:
+            stdin = io.StringIO(json.dumps({"tool_input": {"command": "gh pr list"}}))
+            stdout = io.StringIO()
+            with (
+                patch("sys.stdin", stdin),
+                patch("sys.stdout", stdout),
+                patch("sys.argv", ["gh_guard.py", "--log-level", "info"]),
+                patch("gh_guard.Path.home", return_value=unwritable),
+            ):
+                main()
+            result = json.loads(stdout.getvalue())
+            assert result == {"permissionDecision": "allow"}
+        finally:
+            unwritable.chmod(0o755)
