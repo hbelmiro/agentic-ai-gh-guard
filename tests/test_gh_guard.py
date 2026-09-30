@@ -1,6 +1,9 @@
 import io
 import json
 import logging
+import os
+import subprocess
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from unittest.mock import patch
@@ -27,6 +30,36 @@ def _file_handler() -> RotatingFileHandler:
     ]
     assert len(handlers) == 1
     return handlers[0]
+
+
+def _codex_allow_response() -> dict:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {"behavior": "allow"},
+        }
+    }
+
+
+def _run_hook_subprocess(
+    tmp_path: Path, input_data: dict, hook_target: str
+) -> subprocess.CompletedProcess[str]:
+    script = Path(__file__).parents[1] / "src" / "gh_guard.py"
+    return subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            str(script),
+            "--log-level",
+            "warning",
+            "--hook-target",
+            hook_target,
+        ],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "HOME": str(tmp_path)},
+        input=json.dumps(input_data),
+        text=True,
+    )
 
 
 class TestReadOnlyCommands:
@@ -482,11 +515,11 @@ class TestShellEdgeCases:
     def test_single_quotes_in_double_quotes(self) -> None:
         assert evaluate_command('gh issue list --label "won\'t fix"') == "allow"
 
-    def test_command_substitution_in_arg(self) -> None:
-        assert evaluate_command("gh pr list --limit $(echo 10)") == "allow"
+    def test_command_substitution_in_arg_prompts(self) -> None:
+        assert evaluate_command("gh pr list --limit $(echo 10)") == "ask"
 
-    def test_backtick_substitution(self) -> None:
-        assert evaluate_command("gh pr list --limit `echo 10`") == "allow"
+    def test_backtick_substitution_prompts(self) -> None:
+        assert evaluate_command("gh pr list --limit `echo 10`") == "ask"
 
     def test_long_command(self) -> None:
         long_flags = " ".join(f"--label label{i}" for i in range(100))
@@ -553,17 +586,29 @@ class TestMain:
         logger.handlers.clear()
         logger.setLevel(logging.WARNING)
 
-    def _run_main(self, input_data: dict) -> dict:
+    def _run_main_output(self, input_data: dict, hook_target: str = "claude") -> str:
         stdin = io.StringIO(json.dumps(input_data))
         stdout = io.StringIO()
         with (
             patch("sys.stdin", stdin),
             patch("sys.stdout", stdout),
-            patch("sys.argv", ["gh_guard.py", "--log-level", "warning"]),
+            patch(
+                "sys.argv",
+                [
+                    "gh_guard.py",
+                    "--log-level",
+                    "warning",
+                    "--hook-target",
+                    hook_target,
+                ],
+            ),
             patch("gh_guard.Path.home", return_value=self._tmp_path),
         ):
             main()
-        return json.loads(stdout.getvalue())
+        return stdout.getvalue()
+
+    def _run_main(self, input_data: dict) -> dict:
+        return json.loads(self._run_main_output(input_data))
 
     def test_main_allow(self) -> None:
         result = self._run_main({"tool_input": {"command": "gh pr list"}})
@@ -572,6 +617,38 @@ class TestMain:
     def test_main_ask(self) -> None:
         result = self._run_main({"tool_input": {"command": "gh pr create --fill"}})
         assert result == _hook_response("ask")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh pr list",
+            "gh api repos/owner/repo/pulls",
+            "gh pr list && gh issue list",
+        ],
+    )
+    def test_codex_main_allows_readonly_command(self, command: str) -> None:
+        output = self._run_main_output({"tool_input": {"command": command}}, "codex")
+        assert json.loads(output) == _codex_allow_response()
+
+    @pytest.mark.parametrize(
+        "input_data",
+        [
+            {"tool_input": {"command": "gh pr create --fill"}},
+            {"tool_input": {"command": "gh unknown"}},
+            {"tool_input": {"command": "gh pr list && gh pr create --fill"}},
+            {"tool_input": {"command": "ls -la"}},
+            {"tool_input": {"command": "gh pr list && ls -la"}},
+            {"tool_input": {"command": "gh pr list | jq -r ."}},
+            {"tool_input": {"command": "gh pr list --limit $(touch file)"}},
+            {"tool_input": {"command": "gh pr list --limit `touch file`"}},
+            {},
+        ],
+    )
+    def test_codex_main_defers_non_readonly_commands(self, input_data: dict) -> None:
+        assert self._run_main_output(input_data, "codex") == ""
+
+    def test_codex_main_defers_malformed_input(self) -> None:
+        assert self._run_main_output({"tool_input": []}, "codex") == ""
 
     def test_main_invalid_json(self) -> None:
         stdin = io.StringIO("not json")
@@ -624,6 +701,18 @@ class TestParseArgs:
         args = parse_args(["--log-level", flag])
         assert args.log_level == expected
 
+    def test_hook_target_defaults_to_claude(self) -> None:
+        args = parse_args(["--log-level", "info"])
+        assert args.hook_target == "claude"
+
+    def test_codex_hook_target(self) -> None:
+        args = parse_args(["--log-level", "info", "--hook-target", "codex"])
+        assert args.hook_target == "codex"
+
+    def test_invalid_hook_target_raises(self) -> None:
+        with pytest.raises(SystemExit):
+            parse_args(["--log-level", "info", "--hook-target", "other"])
+
     def test_missing_log_level_raises(self) -> None:
         with pytest.raises(SystemExit):
             parse_args([])
@@ -636,6 +725,29 @@ class TestParseArgs:
         with patch("sys.argv", ["gh_guard.py", "--log-level", "info"]):
             args = parse_args()
         assert args.log_level == "info"
+
+
+class TestCodexHookIntegration:
+    def test_subprocess_allows_readonly_gh_command(self, tmp_path: Path) -> None:
+        result = _run_hook_subprocess(
+            tmp_path, {"tool_input": {"command": "gh pr list"}}, "codex"
+        )
+        assert json.loads(result.stdout) == _codex_allow_response()
+        assert result.stderr == ""
+
+    def test_subprocess_defers_write_command(self, tmp_path: Path) -> None:
+        result = _run_hook_subprocess(
+            tmp_path, {"tool_input": {"command": "gh pr create --fill"}}, "codex"
+        )
+        assert result.stdout == ""
+        assert result.stderr == ""
+
+    def test_config_uses_codex_permission_request_hook(self) -> None:
+        config_path = Path(__file__).parents[1] / "codex-hooks.json.example"
+        config = json.loads(config_path.read_text())
+        hook = config["hooks"]["PermissionRequest"][0]
+        assert hook["matcher"] == "^Bash$"
+        assert "--hook-target codex" in hook["hooks"][0]["command"]
 
 
 class TestSetupLogging:
