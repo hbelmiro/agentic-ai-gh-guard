@@ -19,6 +19,16 @@ def _hook_response(decision: str) -> dict:
     }
 
 
+def _file_handler() -> RotatingFileHandler:
+    handlers = [
+        handler
+        for handler in logging.getLogger("gh_guard").handlers
+        if isinstance(handler, RotatingFileHandler)
+    ]
+    assert len(handlers) == 1
+    return handlers[0]
+
+
 class TestReadOnlyCommands:
     """Read-only gh commands should return 'allow'."""
 
@@ -666,20 +676,16 @@ class TestSetupLogging:
 
     def test_uses_rotating_handler(self, tmp_path: Path) -> None:
         setup_logging("info", log_dir=tmp_path)
-        logger = logging.getLogger("gh_guard")
-        assert len(logger.handlers) == 1
-        assert isinstance(logger.handlers[0], RotatingFileHandler)
+        assert isinstance(_file_handler(), RotatingFileHandler)
 
     def test_handler_max_bytes(self, tmp_path: Path) -> None:
         setup_logging("info", log_dir=tmp_path)
-        handler = logging.getLogger("gh_guard").handlers[0]
-        assert isinstance(handler, RotatingFileHandler)
+        handler = _file_handler()
         assert handler.maxBytes == 1_048_576
 
     def test_handler_backup_count(self, tmp_path: Path) -> None:
         setup_logging("info", log_dir=tmp_path)
-        handler = logging.getLogger("gh_guard").handlers[0]
-        assert isinstance(handler, RotatingFileHandler)
+        handler = _file_handler()
         assert handler.backupCount == 3
 
     def test_no_propagation(self, tmp_path: Path) -> None:
@@ -698,14 +704,12 @@ class TestSetupLogging:
     def test_idempotent(self, tmp_path: Path) -> None:
         setup_logging("info", log_dir=tmp_path)
         setup_logging("debug", log_dir=tmp_path)
-        logger = logging.getLogger("gh_guard")
-        assert len(logger.handlers) == 1
+        assert isinstance(_file_handler(), RotatingFileHandler)
 
     def test_default_log_dir(self, tmp_path: Path) -> None:
         with patch("gh_guard.Path.home", return_value=tmp_path):
             setup_logging("info")
-        handler = logging.getLogger("gh_guard").handlers[0]
-        assert isinstance(handler, RotatingFileHandler)
+        handler = _file_handler()
         expected = str(tmp_path / ".agentic-ai-gh-guard" / "logs" / "gh_guard.log")
         assert handler.baseFilename == expected
 
@@ -727,7 +731,7 @@ class TestLogOutput:
         self._log_file = self._log_dir / "gh_guard.log"
 
     def _log_contents(self) -> str:
-        logging.getLogger("gh_guard").handlers[0].flush()
+        _file_handler().flush()
         return self._log_file.read_text()
 
     def test_evaluate_logs_subcommand(self) -> None:
