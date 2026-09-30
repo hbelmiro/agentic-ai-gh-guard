@@ -195,6 +195,10 @@ def _evaluate_single(command: str) -> str:
 
 
 def evaluate_command(command: str) -> str:
+    if "$(" in command or "`" in command:
+        _logger.debug("command substitution detected")
+        return ASK
+
     parts = _split_compound(command)
     _logger.debug("compound parts: %d", len(parts))
     for part in parts:
@@ -204,6 +208,19 @@ def evaluate_command(command: str) -> str:
         if _evaluate_single(stripped) == ASK:
             return ASK
     return ALLOW
+
+
+def _contains_only_gh_commands(command: str) -> bool:
+    has_command = False
+    for part in _split_compound(command):
+        try:
+            tokens = shlex.split(part)
+        except ValueError:
+            return False
+        if not tokens or tokens[0] != "gh":
+            return False
+        has_command = True
+    return has_command
 
 
 def setup_logging(level: str, log_dir: Path | None = None) -> None:
@@ -234,6 +251,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("debug", "info", "warning", "error", "critical"),
         required=True,
     )
+    parser.add_argument("--hook-target", choices=("claude", "codex"), default="claude")
     return parser.parse_args(argv)
 
 
@@ -242,22 +260,36 @@ def main() -> None:
     with contextlib.suppress(OSError, ValueError):
         setup_logging(args.log_level)
 
+    command = ""
     try:
         data = json.loads(sys.stdin.read())
-        command = data.get("tool_input", {}).get("command", "")
-        decision = evaluate_command(command)
+        tool_input = data.get("tool_input", {})
+        command = tool_input.get("command", "")
+        decision = ASK if not isinstance(command, str) else evaluate_command(command)
         _logger.info("decision: %s", decision)
-    except (json.JSONDecodeError, KeyError, TypeError):
+    except (AttributeError, json.JSONDecodeError, KeyError, TypeError):
         _logger.warning("failed to parse input")
         decision = ASK
 
-    json.dump(
-        {
+    if args.hook_target == "codex":
+        if decision != ALLOW or not _contains_only_gh_commands(command):
+            return
+        response = {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "allow"},
+            }
+        }
+    else:
+        response = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": decision,
             }
-        },
+        }
+
+    json.dump(
+        response,
         sys.stdout,
     )
     sys.stdout.write("\n")

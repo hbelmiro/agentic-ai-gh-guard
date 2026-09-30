@@ -1,7 +1,7 @@
 [project]
 name = "agentic-ai-gh-guard"
 version = "0.1.0"
-description = "Claude Code hook that auto-allows read-only gh CLI commands and prompts for writes"
+description = "Claude Code and Codex hook that auto-allows read-only gh CLI commands"
 requires-python = ">=3.14"
 license = "Apache-2.0"
 dependencies = []

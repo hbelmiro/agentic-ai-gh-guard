@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/hbelmiro/agentic-ai-gh-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/hbelmiro/agentic-ai-gh-guard/actions/workflows/ci.yml)
 
-A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) hook that auto-allows read-only `gh` CLI commands and prompts for everything else.
+A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and Codex hook that auto-allows recognized read-only `gh` CLI commands. Claude Code prompts for every other `gh` command; Codex defers other approval requests to its normal flow.
 
 ## The problem
 
@@ -33,7 +33,7 @@ gh repo delete x    --> prompts you
 git clone https://github.com/hbelmiro/agentic-ai-gh-guard.git
 ```
 
-### 2. Configure the hook
+### 2. Configure Claude Code
 
 Add the hook to your Claude Code settings:
 
@@ -61,7 +61,18 @@ Add the hook to your Claude Code settings:
 
 Replace `/path/to/agentic-ai-gh-guard` with the absolute path where you cloned the repository.
 
-### 3. That's it
+### 3. Configure Codex
+
+Copy [`codex-hooks.json.example`](codex-hooks.json.example) to one of Codex's hook locations:
+
+- **Global** (all projects): `~/.codex/hooks.json`
+- **Project-level** (single repo): `.codex/hooks.json`
+
+Replace `/absolute/path/to/src/gh_guard.py` with the script's absolute path. Codex runs the hook for Bash approval requests. It auto-allows an approval only when every command in the request is a recognized read-only `gh` command. For every other request, it makes no decision and Codex shows its normal approval prompt.
+
+Codex requires review and trust for non-managed hooks. Run `/hooks` in Codex to review and trust the configured hook.
+
+### 4. That's it
 
 No dependencies to install -- the hook uses only Python standard library.
 
@@ -104,6 +115,8 @@ The following commands are auto-allowed:
 
 For compound commands (`&&`, `||`, `;`, `|`), each part is evaluated independently. If **any** part is not read-only, the entire command prompts for permission.
 
+Commands containing command substitution (`$(...)` or backticks) always prompt for permission.
+
 ## How hooks work
 
 This is a Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks). When Claude tries to run a Bash command matching `gh *`:
@@ -114,6 +127,8 @@ This is a Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks). 
 4. Claude Code either auto-allows or shows the normal permission prompt
 
 The hook only runs when **Claude** uses `gh` -- it does not affect commands you run directly in your terminal.
+
+In Codex, the hook runs only when Codex is about to show a Bash approval prompt. It does not make commands prompt that Codex would otherwise run without approval.
 
 ## Logging
 
