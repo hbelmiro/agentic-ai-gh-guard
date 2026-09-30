@@ -212,7 +212,7 @@ def setup_logging(level: str, log_dir: Path | None = None) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger("gh_guard")
-    if logger.handlers:
+    if any(isinstance(handler, RotatingFileHandler) for handler in logger.handlers):
         return
 
     logger.setLevel(level.upper())
